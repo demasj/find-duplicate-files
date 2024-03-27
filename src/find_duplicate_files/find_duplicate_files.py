@@ -1,30 +1,66 @@
 import os
-import hashlib
 import sys
-from collections import defaultdict
+import hashlib
 import concurrent.futures
+from collections import defaultdict
 import json
+import time
 from datetime import datetime
 import win32security  # For Windows systems
-import time
+import logging
+from logging.handlers import TimedRotatingFileHandler
+
+
+def setup_logger():
+    """
+    logger function object for logging information to a file.
+    """
+    logging_directory = 'logging'
+    os.makedirs(logging_directory, exist_ok=True)
+
+    logger = logging.getLogger("Find Duplicate Files Logger")
+    logger.setLevel(logging.INFO)
+
+    handler = TimedRotatingFileHandler("logging/log.log", when="midnight", interval=1, backupCount=7)
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+    logger.addHandler(handler)
+
+    return logger
+
+
+logger = setup_logger()
 
 def calculate_hash(file_path, block_size=65536):
     hasher = hashlib.sha256()
-    with open(file_path, 'rb') as f:
-        buffer = f.read(block_size)
-        while buffer:
-            hasher.update(buffer)
+    try:
+        with open(file_path, 'rb') as f:
             buffer = f.read(block_size)
+            while buffer:
+                hasher.update(buffer)
+                buffer = f.read(block_size)
+    except Exception as e:
+        logger.error(f"Error reading file {file_path}: {e}")
+        return None  # Return None to indicate failure
     return hasher.hexdigest()
 
 
-def find_duplicates(directories):
-    for directory in directories:
-        for dirpath, dirnames, filenames in os.walk(directory):
-            for filename in filenames:
-                full_path = os.path.join(dirpath, filename)
-                file_hash = calculate_hash(full_path)
-                yield file_hash, full_path
+def find_duplicates_parallel(directories):
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        # Create a list to hold all future objects
+        future_to_file = {executor.submit(calculate_hash, os.path.join(dirpath, filename)): (filename, dirpath)
+                          for directory in directories
+                          for dirpath, dirnames, filenames in os.walk(directory)
+                          if "Cache" not in dirpath  # Skip directories containing 'Cache' in their path
+                          for filename in filenames}
+        for future in concurrent.futures.as_completed(future_to_file):
+            file_hash = future.result()
+            if file_hash is None:  # Skip files that couldn't be read
+                continue
+            filename, dirpath = future_to_file[future]
+            full_path = os.path.join(dirpath, filename)
+            yield file_hash, full_path
+
 
 def get_file_metadata(file_path):
     """
@@ -61,7 +97,7 @@ def export_duplicates_to_json(directories, output_file='duplicates.json'):
         os.remove(output_file)
 
     hashes = defaultdict(list)
-    for file_hash, full_path in find_duplicates(directories):
+    for file_hash, full_path in find_duplicates_parallel(directories):
         hashes[file_hash].append(full_path)
     
     # Collecting only the groups of files that have duplicates
@@ -79,8 +115,8 @@ def export_duplicates_to_json(directories, output_file='duplicates.json'):
     indexed_duplicates = {f"Duplicate Group {index + 1}": files for index, files in enumerate(duplicates)}
     
     # Writing the modified list of duplicates with metadata to a JSON file
-    with open(output_file, 'w') as f:
-        json.dump(indexed_duplicates, f, indent=4)
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(indexed_duplicates, f, indent=4, ensure_ascii=False)
     
     print(f'Duplicates exported to {output_file}')
 
@@ -97,6 +133,7 @@ def main():
 
     end_time = time.time()  # Capture the end time
     duration = end_time - start_time  # Calculate the duration
+    logger.info((f"Runtime duration searching in directories {directories}: {duration} seconds") ) # Log duration
     print(f"Runtime duration: {duration} seconds")  # Print the duration
 
 if __name__ == "__main__":
