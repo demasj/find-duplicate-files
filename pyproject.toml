@@ -8,6 +8,7 @@ packages = [{include = "find_duplicate_files", from = "src"}]
 
 [tool.poetry.dependencies]
 python = "^3.12"
+pywin32 = "^306"
 
 
 [build-system]
